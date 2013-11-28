@@ -62,7 +62,6 @@ static struct delayed_work decide_hotplug;
 
 static unsigned long down_delay;
 
-
 static inline int get_cpu_load(unsigned int cpu)
 {
 	struct cpu_load_data *pcpu = &per_cpu(cpuload, cpu);
@@ -95,7 +94,6 @@ static inline int get_cpu_load(unsigned int cpu)
 
 static void calculate_load_for_cpu(int cpu) 
 {
-
 	for_each_online_cpu(cpu) 
 	{
 		/*  
@@ -103,7 +101,7 @@ static void calculate_load_for_cpu(int cpu)
 		 */
 		if (get_cpu_load(cpu) >= stats.default_first_level
 			&& likely(stats.counter[cpu] < HIGH_LOAD_COUNTER)) {
-			stats.counter[cpu] += 2;
+				stats.counter[cpu] += 2;
 		}
 
 		else {
@@ -112,10 +110,8 @@ static void calculate_load_for_cpu(int cpu)
 		}
 
 		/* Reset CPU */
-		if (cpu) {
-			cpu = 0;
+		if (cpu)
 			break;
-		}
 	}	
 
 }
@@ -127,7 +123,7 @@ static void calculate_load_for_cpu(int cpu)
 
 static void decide_hotplug_func(struct work_struct *work)
 {
-	unsigned long now = jiffies;
+	struct cpufreq_policy policy;
 	static unsigned long last_change_time;
 	int i, j;
 
@@ -135,22 +131,24 @@ static void decide_hotplug_func(struct work_struct *work)
 
 	for (i = 0, j = 2; i < 2; i++, j++) {
 		calculate_load_for_cpu(i);
+		cpufreq_get_policy(&policy, i);
 
 		if (stats.counter[i] >= 10) {
-			if (!cpu_online(j)) {
+			if (!cpu_online(j) && cpufreq_quick_get(i) == policy.max) {
 				printk("[Hot-Plug]: CPU%u ready for onlining\n", j);
 				cpu_up(j);
+				last_change_time = ktime_to_ms(ktime_get());
 			}
 		}
 		else {
 			/* Calculate again */
-			if ((now + SAMPLING_RATE_MS) > last_change_time) {
+			if (ktime_to_ms(ktime_get()) + (SAMPLING_RATE_MS * 8) > last_change_time) {
 				calculate_load_for_cpu(i);
 
 				if (stats.counter[i] > 0 && cpu_online(j)) {
-					printk("[Hot-Plug]: CPU%u ready for offlining\n", j);
+						printk("[Hot-Plug]: CPU%u ready for offlining\n", j);
 						cpu_down(j);
-						last_change_time = now;
+						last_change_time = ktime_to_ms(ktime_get());
 				}
 			}
 		}
@@ -171,11 +169,8 @@ static void grouper_hotplug_early_suspend(struct early_suspend *handler)
 	pr_info("Early Suspend stopping Hotplug work...\n");
     
 	for_each_online_cpu(cpu) 
-	{
-		if (cpu) {
+		if (cpu)
 			cpu_down(cpu);
-		}
-	}
 }
 
 static void grouper_hotplug_late_resume(struct early_suspend *handler)
