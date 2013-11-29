@@ -19,7 +19,7 @@
 /*
  * TODO   - Hotplug driver makes static decisions (thread migraten could be expansive)
  *        - Find lowest working core for shutdown
- *	  - Add Thermal Throttle Driver
+ *        - Add Thermal Throttle Driver
  */
 
 #include <linux/kernel.h>
@@ -33,7 +33,7 @@
 #include <linux/delay.h>
 #include <linux/hotplug.h>
  
-#define DEFAULT_FIRST_LEVEL	75
+#define DEFAULT_FIRST_LEVEL	80
 #define LOAD_BALANCER		30
 #define HIGH_LOAD_COUNTER	20
 #define SAMPLING_RATE_MS	500
@@ -147,7 +147,16 @@ static void decide_hotplug_func(struct work_struct *work)
 
 				if (stats.counter[i] > 0 && cpu_online(j)) {
 						printk("[Hot-Plug]: CPU%u ready for offlining\n", j);
-						cpu_down(j);
+						
+						if (get_cpu_load(j) > get_cpu_load(j+1) 
+								&& cpu_online(j+1))
+							cpu_down(j+1);
+						else if (get_cpu_load(j) > get_cpu_load(j-1) 
+								&& cpu_online(j-1) && j-1 != i)
+							cpu_down(j-1);
+						else
+							cpu_down(j); 
+
 						last_change_time = ktime_to_ms(ktime_get());
 				}
 			}
