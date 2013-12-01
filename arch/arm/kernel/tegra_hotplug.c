@@ -33,8 +33,8 @@
 #include <linux/delay.h>
 #include <linux/hotplug.h>
  
-#define DEFAULT_FIRST_LEVEL	80
-#define LOAD_BALANCER		30
+#define DEFAULT_FIRST_LEVEL	70
+#define LOAD_BALANCER		10
 #define HIGH_LOAD_COUNTER	20
 #define SAMPLING_RATE_MS	500
 
@@ -42,6 +42,7 @@ struct cpu_stats
 {
 	unsigned int total_cpus;
 	unsigned int default_first_level;
+	unsigned int default_load_balancer;
 	unsigned int suspend_frequency;
 
 	/* For the three hot-plug-able Cores */
@@ -94,13 +95,18 @@ static inline int get_cpu_load(unsigned int cpu)
 
 static void calculate_load_for_cpu(int cpu) 
 {
+	struct cpufreq_policy policy;
+
 	for_each_online_cpu(cpu) 
 	{
+		cpufreq_get_policy(&policy, cpu);
 		/*  
-		 * We are above our threshold, so update our counter for cpu;
+		 * We are above our threshold, so update our counter for cpu.
+		 * Consider this only, if we are on our max frequency
 		 */
 		if (get_cpu_load(cpu) >= stats.default_first_level
-			&& likely(stats.counter[cpu] < HIGH_LOAD_COUNTER)) {
+			&& likely(stats.counter[cpu] < HIGH_LOAD_COUNTER)
+			&& cpufreq_quick_get(cpu) == policy.max) {
 				stats.counter[cpu] += 2;
 		}
 
@@ -108,6 +114,10 @@ static void calculate_load_for_cpu(int cpu)
 			if (stats.counter[cpu] > 0)
 				stats.counter[cpu]--;
 		}
+		
+		if (stats.counter[cpu] > 0 && 
+			get_cpu_load(cpu) <= stats.default_load_balancer)
+				stats.counter[cpu]--;
 
 		/* Reset CPU */
 		if (cpu)
@@ -123,7 +133,6 @@ static void calculate_load_for_cpu(int cpu)
 
 static void decide_hotplug_func(struct work_struct *work)
 {
-	struct cpufreq_policy policy;
 	static unsigned long last_change_time;
 	int i, j;
 
@@ -131,17 +140,16 @@ static void decide_hotplug_func(struct work_struct *work)
 
 	for (i = 0, j = 2; i < 2; i++, j++) {
 		calculate_load_for_cpu(i);
-		cpufreq_get_policy(&policy, i);
 
 		if (stats.counter[i] >= 10) {
-			if (!cpu_online(j) && cpufreq_quick_get(i) == policy.max) {
+			if (!cpu_online(j)) {
 				printk("[Hot-Plug]: CPU%u ready for onlining\n", j);
 				cpu_up(j);
 				last_change_time = ktime_to_ms(ktime_get());
 			}
 		}
 		else {
-			/* Calculate again */
+			/* Prevent fast on-/offlining */ 
 			if (ktime_to_ms(ktime_get()) + (SAMPLING_RATE_MS * 8) > last_change_time) {
 				calculate_load_for_cpu(i);
 
@@ -152,7 +160,7 @@ static void decide_hotplug_func(struct work_struct *work)
 								&& cpu_online(j+1))
 							cpu_down(j+1);
 						else if (get_cpu_load(j) > get_cpu_load(j-1) 
-								&& cpu_online(j-1) && j-1 != i)
+								&& cpu_online(j-1) && j-1 != 1)
 							cpu_down(j-1);
 						else
 							cpu_down(j); 
@@ -213,6 +221,7 @@ int __init grouper_hotplug_init(void)
     
 	/* init everything here */
 	stats.total_cpus = num_present_cpus();
+	stats.default_first_level = DEFAULT_FIRST_LEVEL;
 	stats.default_first_level = DEFAULT_FIRST_LEVEL;
 	down_delay = msecs_to_jiffies(SAMPLING_RATE_MS);
 	
