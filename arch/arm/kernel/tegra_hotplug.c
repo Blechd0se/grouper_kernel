@@ -28,13 +28,14 @@
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/earlysuspend.h>
+#include <linux/notifier.h>
 #include <linux/cpufreq.h>
 #include <linux/delay.h>
 #include <linux/hotplug.h>
- 
-#define DEFAULT_FIRST_LEVEL	70
+
+#define DEFAULT_FIRST_LEVEL	80
 #define LOAD_BALANCER		10
-#define HIGH_LOAD_COUNTER	20
+#define HIGH_LOAD_COUNTER	25
 #define SAMPLING_RATE_MS	500
 
 struct cpu_stats
@@ -113,10 +114,6 @@ static void calculate_load_for_cpu(int cpu)
 			if (stats.counter[cpu] > 0)
 				stats.counter[cpu]--;
 		}
-		
-		if (stats.counter[cpu] > 0 && 
-			get_cpu_load(cpu) <= stats.default_load_balancer)
-				stats.counter[cpu]--;
 
 		/* Reset CPU */
 		if (cpu)
@@ -241,12 +238,12 @@ int __init grouper_hotplug_init(void)
 	stats.counter[0] = 0;
 	stats.counter[1] = 0;
 
-	wq = alloc_ordered_workqueue("grouper_hotplug_workqueue", 0);
+	wq = create_singlethread_workqueue("grouper_hotplug_workqueue");
     
 	if (!wq)
 		return -ENOMEM;
 
-	pm_wq = alloc_workqueue("grouper_pm_workqueue", 0, 1);
+	pm_wq = create_singlethread_workqueue("grouper_pm_workqueue");
 
 	if (!pm_wq)
 		return -ENOMEM;
