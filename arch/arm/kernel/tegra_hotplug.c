@@ -18,7 +18,6 @@
 
 /*
  * TODO   - Hotplug driver makes static decisions (thread migraten could be expansive)
- *        - Find lowest working core for shutdown
  *        - Add Thermal Throttle Driver
  */
 
@@ -43,7 +42,6 @@ struct cpu_stats
 	unsigned int total_cpus;
 	unsigned int default_first_level;
 	unsigned int default_load_balancer;
-	unsigned int suspend_frequency;
 
 	/* For the three hot-plug-able Cores */
 	unsigned int counter[2];
@@ -56,12 +54,14 @@ struct cpu_load_data {
 
 static DEFINE_PER_CPU(struct cpu_load_data, cpuload);
 
-
 static struct cpu_stats stats;
 static struct workqueue_struct *wq;
 static struct delayed_work decide_hotplug;
+static struct workqueue_struct *pm_wq;
+static struct work_struct resume;
+static struct work_struct suspend;
 
-static unsigned long down_delay;
+static unsigned long queue_sampling;
 
 static inline int get_cpu_load(unsigned int cpu)
 {
@@ -97,8 +97,7 @@ static void calculate_load_for_cpu(int cpu)
 {
 	struct cpufreq_policy policy;
 
-	for_each_online_cpu(cpu) 
-	{
+	for_each_online_cpu(cpu) {
 		cpufreq_get_policy(&policy, cpu);
 		/*  
 		 * We are above our threshold, so update our counter for cpu.
@@ -131,7 +130,7 @@ static void calculate_load_for_cpu(int cpu)
  * how many cores should be on- or offlined
  */
 
-static void decide_hotplug_func(struct work_struct *work)
+static void __ref decide_hotplug_func(struct work_struct *work)
 {
 	static unsigned long last_change_time;
 	int i, j;
@@ -150,7 +149,7 @@ static void decide_hotplug_func(struct work_struct *work)
 		}
 		else {
 			/* Prevent fast on-/offlining */ 
-			if (ktime_to_ms(ktime_get()) + (SAMPLING_RATE_MS * 8) > last_change_time) {
+			if ((ktime_to_ms(ktime_get()) + (SAMPLING_RATE_MS * 8)) > last_change_time) {
 				calculate_load_for_cpu(i);
 
 				if (stats.counter[i] > 0 && cpu_online(j)) {
@@ -172,16 +171,17 @@ static void decide_hotplug_func(struct work_struct *work)
 	}
 	
 	/* Make a dedicated work_queue */
-	queue_delayed_work(wq, &decide_hotplug, down_delay);
+	queue_delayed_work(wq, &decide_hotplug, queue_sampling);
 }
 
-static void grouper_hotplug_early_suspend(struct early_suspend *handler)
+static void suspend_func(struct work_struct *work)
 {	 
 	int cpu;
 
 	/* cancel the hotplug work when the screen is off and flush the WQ */
 	flush_workqueue(wq);
 	cancel_delayed_work_sync(&decide_hotplug);
+	cancel_work_sync(&resume);
 
 	pr_info("Early Suspend stopping Hotplug work...\n");
     
@@ -190,22 +190,34 @@ static void grouper_hotplug_early_suspend(struct early_suspend *handler)
 			cpu_down(cpu);
 }
 
-static void grouper_hotplug_late_resume(struct early_suspend *handler)
-{  
+static void __ref resume_func(struct work_struct *work)
+{
 	int cpu;
 
 	/* online all cores when the screen goes online */
-	for_each_possible_cpu(cpu) 
-		if (cpu)
+	for_each_possible_cpu(cpu) {
+		if (cpu) 
 			cpu_up(cpu);
+	}
+
+	cancel_work_sync(&suspend);
 
 	/* Resetting Counters */
 	stats.counter[0] = 0;
 	stats.counter[1] = 0;
 
-
 	pr_info("Late Resume starting Hotplug work...\n");
 	queue_delayed_work(wq, &decide_hotplug, HZ);
+}
+
+static void grouper_hotplug_early_suspend(struct early_suspend *handler)
+{   
+	queue_work(pm_wq, &suspend);
+}
+
+static void grouper_hotplug_late_resume(struct early_suspend *handler)
+{  
+	queue_work(pm_wq, &resume);
 }
 
 static struct early_suspend grouper_hotplug_suspend =
@@ -222,8 +234,8 @@ int __init grouper_hotplug_init(void)
 	/* init everything here */
 	stats.total_cpus = num_present_cpus();
 	stats.default_first_level = DEFAULT_FIRST_LEVEL;
-	stats.default_first_level = DEFAULT_FIRST_LEVEL;
-	down_delay = msecs_to_jiffies(SAMPLING_RATE_MS);
+	stats.default_load_balancer = LOAD_BALANCER;
+	queue_sampling = msecs_to_jiffies(SAMPLING_RATE_MS);
 	
 	/* Resetting Counters */
 	stats.counter[0] = 0;
@@ -233,10 +245,17 @@ int __init grouper_hotplug_init(void)
     
 	if (!wq)
 		return -ENOMEM;
+
+	pm_wq = alloc_workqueue("grouper_pm_workqueue", 0, 1);
+
+	if (!pm_wq)
+		return -ENOMEM;
     
 	INIT_DELAYED_WORK(&decide_hotplug, decide_hotplug_func);
-	queue_delayed_work(wq, &decide_hotplug, down_delay);
-    
+	INIT_WORK(&resume, resume_func);
+	INIT_WORK(&suspend, suspend_func);
+	queue_delayed_work(wq, &decide_hotplug, queue_sampling);
+
 	register_early_suspend(&grouper_hotplug_suspend);
     
 	return 0;
