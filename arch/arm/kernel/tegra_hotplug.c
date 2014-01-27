@@ -34,7 +34,6 @@
 #include <linux/hotplug.h>
 
 #define DEFAULT_FIRST_LEVEL	80
-#define LOAD_BALANCER		10
 #define HIGH_LOAD_COUNTER	25
 #define SAMPLING_RATE_MS	500
 
@@ -42,7 +41,7 @@ struct cpu_stats
 {
 	unsigned int total_cpus;
 	unsigned int default_first_level;
-	unsigned int default_load_balancer;
+	unsigned long timestamp;
 
 	/* For the three hot-plug-able Cores */
 	unsigned int counter[2];
@@ -129,8 +128,8 @@ static void calculate_load_for_cpu(int cpu)
 
 static void __ref decide_hotplug_func(struct work_struct *work)
 {
-	static unsigned long last_change_time;
 	int i, j;
+	int current_cpu = 0;
 
 	/* Do load calculation for each cpu counter */
 
@@ -141,34 +140,42 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 			if (!cpu_online(j)) {
 				printk("[Hot-Plug]: CPU%u ready for onlining\n", j);
 				cpu_up(j);
-				last_change_time = ktime_to_ms(ktime_get());
+				stats.timestamp = jiffies;
 			}
 		}
 		else {
-			/* Prevent fast on-/offlining */ 
-			if ((ktime_to_ms(ktime_get()) + (SAMPLING_RATE_MS * 8)) > last_change_time) {
-				calculate_load_for_cpu(i);
+			calculate_load_for_cpu(i);
 
+			/* Prevent fast on-/offlining */ 
+			if (time_is_after_jiffies(stats.timestamp + (HZ * 4))) {
+				/* Rearm you work_queue immediatly */
+				queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
+			}
+			else {
 				if (stats.counter[i] > 0 && cpu_online(j)) {
-						printk("[Hot-Plug]: CPU%u ready for offlining\n", j);
 						
+						/*
+						 * Decide which core should be offlined
+						 */
+
 						if (get_cpu_load(j) > get_cpu_load(j+1) 
 								&& cpu_online(j+1))
-							cpu_down(j+1);
+							current_cpu = j + 1;
 						else if (get_cpu_load(j) > get_cpu_load(j-1) 
 								&& cpu_online(j-1) && j-1 != 1)
-							cpu_down(j-1);
+							current_cpu = j - 1;
 						else
-							cpu_down(j); 
-
-						last_change_time = ktime_to_ms(ktime_get());
+							current_cpu = j;
+						
+						printk("[Hot-Plug]: CPU%u ready for offlining\n", current_cpu);	
+						cpu_down(current_cpu);
 				}
 			}
 		}
 	}
 	
 	/* Make a dedicated work_queue */
-	queue_delayed_work(wq, &decide_hotplug, queue_sampling);
+	queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
 }
 
 static void suspend_func(struct work_struct *work)
@@ -202,9 +209,10 @@ static void __ref resume_func(struct work_struct *work)
 	/* Resetting Counters */
 	stats.counter[0] = 0;
 	stats.counter[1] = 0;
+	stats.timestamp = jiffies;
 
 	pr_info("Late Resume starting Hotplug work...\n");
-	queue_delayed_work(wq, &decide_hotplug, HZ);
+	queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
 }
 
 static void grouper_hotplug_early_suspend(struct early_suspend *handler)
@@ -231,12 +239,12 @@ int __init grouper_hotplug_init(void)
 	/* init everything here */
 	stats.total_cpus = num_present_cpus();
 	stats.default_first_level = DEFAULT_FIRST_LEVEL;
-	stats.default_load_balancer = LOAD_BALANCER;
 	queue_sampling = msecs_to_jiffies(SAMPLING_RATE_MS);
 	
 	/* Resetting Counters */
 	stats.counter[0] = 0;
 	stats.counter[1] = 0;
+	stats.timestamp = jiffies;
 
 	wq = create_singlethread_workqueue("grouper_hotplug_workqueue");
     
@@ -251,7 +259,7 @@ int __init grouper_hotplug_init(void)
 	INIT_DELAYED_WORK(&decide_hotplug, decide_hotplug_func);
 	INIT_WORK(&resume, resume_func);
 	INIT_WORK(&suspend, suspend_func);
-	queue_delayed_work(wq, &decide_hotplug, queue_sampling);
+	queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
 
 	register_early_suspend(&grouper_hotplug_suspend);
     
