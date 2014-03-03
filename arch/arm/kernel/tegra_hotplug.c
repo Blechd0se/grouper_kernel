@@ -17,7 +17,7 @@
  */
 
 /*
- * TODO   - Hotplug driver makes static decisions (thread migraten could be expansive)
+ * TODO   - Enable sysfs entries for better tuning
  *        - Add Thermal Throttle Driver
  */
 
@@ -34,17 +34,19 @@
 #include <linux/hotplug.h>
 
 #define DEFAULT_FIRST_LEVEL	80
+#define DEFAULT_SECOND_LEVEL	70
 #define HIGH_LOAD_COUNTER	25
 #define SAMPLING_RATE_MS	500
 
 struct cpu_stats
 {
-	unsigned int total_cpus;
 	unsigned int default_first_level;
+	unsigned int default_second_level;
 	unsigned long timestamp;
 
 	/* For the three hot-plug-able Cores */
 	unsigned int counter[2];
+	unsigned int cpu_load_stats[3];
 };
 
 struct cpu_load_data {
@@ -90,6 +92,26 @@ static inline int get_cpu_load(unsigned int cpu)
 }
 
 /*
+ * Returns the average load for all currently onlined cpus
+ */
+
+static int get_load_for_all_cpu(void)
+{
+	int cpu;
+	int load = 0;
+
+	for_each_online_cpu(cpu) {
+
+		stats.cpu_load_stats[cpu] = 0;
+		stats.cpu_load_stats[cpu] = get_cpu_load(cpu);
+		load = load + stats.cpu_load_stats[cpu];
+	}
+	
+	load = (unsigned int) (load / num_online_cpus());	
+	return load;
+}
+
+/*
  * Calculates the load for a given cpu
  */ 
 
@@ -103,7 +125,8 @@ static void calculate_load_for_cpu(int cpu)
 		 * We are above our threshold, so update our counter for cpu.
 		 * Consider this only, if we are on our max frequency
 		 */
-		if (get_cpu_load(cpu) >= stats.default_first_level
+		if (get_cpu_load(cpu) >= stats.default_first_level &&
+			get_load_for_all_cpu() >= stats.default_second_level
 			&& likely(stats.counter[cpu] < HIGH_LOAD_COUNTER)
 			&& cpufreq_quick_get(cpu) == policy.max) {
 				stats.counter[cpu] += 2;
@@ -136,7 +159,7 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 	for (i = 0, j = 2; i < 2; i++, j++) {
 		calculate_load_for_cpu(i);
 
-		if (stats.counter[i] >= 10) {
+		if (stats.counter[i] >= 10 && get_load_for_all_cpu() >= stats.default_second_level) {
 			if (!cpu_online(j)) {
 				printk("[Hot-Plug]: CPU%u ready for onlining\n", j);
 				cpu_up(j);
@@ -147,7 +170,7 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 			calculate_load_for_cpu(i);
 
 			/* Prevent fast on-/offlining */ 
-			if (time_is_after_jiffies(stats.timestamp + (HZ * 4))) {
+			if (time_is_after_jiffies(stats.timestamp + (HZ * 2))) {
 				/* Rearm you work_queue immediatly */
 				queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
 			}
@@ -169,6 +192,7 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 						
 						printk("[Hot-Plug]: CPU%u ready for offlining\n", current_cpu);	
 						cpu_down(current_cpu);
+						stats.timestamp = jiffies;
 				}
 			}
 		}
@@ -237,8 +261,8 @@ int __init grouper_hotplug_init(void)
 	pr_info("Grouper Hotplug driver started.\n");
     
 	/* init everything here */
-	stats.total_cpus = num_present_cpus();
 	stats.default_first_level = DEFAULT_FIRST_LEVEL;
+	stats.default_second_level = DEFAULT_SECOND_LEVEL;
 	queue_sampling = msecs_to_jiffies(SAMPLING_RATE_MS);
 	
 	/* Resetting Counters */
